@@ -340,11 +340,13 @@ def create_hd_wallet_provider(
             )
 
     if network is None:
-        # Try GETBLOCK_NETWORK first, then BTC_NETWORK, fallback to mainnet
-        network = os.environ.get(
-            "GETBLOCK_NETWORK",
-            os.environ.get("BTC_NETWORK", "mainnet")
-        )
+        currency_key = currency.upper()
+        if currency_key == "BTC":
+            network = os.environ.get("BTC_NETWORK")
+        elif currency_key == "LTC":
+            network = os.environ.get("LTC_NETWORK")
+        if not network:
+            network = os.environ.get("GETBLOCK_NETWORK", "mainnet")
 
     return HDWalletProvider(
         currency=currency,

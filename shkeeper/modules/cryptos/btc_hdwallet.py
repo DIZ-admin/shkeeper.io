@@ -85,6 +85,25 @@ class BtcHDWallet(Btc):
         """
         return "Bitcoin (HD Wallet)"
 
+    def getstatus(self):
+        """
+        Check Bitcoin network status via GetBlock.io.
+
+        Returns:
+            str: "Synced" when reachable, "Offline" otherwise
+        """
+        try:
+            if self.getblock_client is None:
+                self.getblock_client = create_getblock_client(currency="BTC")
+                logger.info("GetBlock.io client loaded for Bitcoin status")
+            height = self.getblock_client._rpc_call("getblockcount", [])
+            if height is None:
+                return "Offline"
+            return "Synced"
+        except Exception as e:
+            logger.error(f"GetBlock.io status check failed: {e}", exc_info=True)
+            return super().getstatus()
+
     def mkaddr(self, **kwargs):
         """
         Generate new Bitcoin address using HD wallet.

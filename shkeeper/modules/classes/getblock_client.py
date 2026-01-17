@@ -372,7 +372,13 @@ def create_getblock_client(
         >>> client = create_getblock_client("BTC", access_token="custom-token")
     """
     if access_token is None:
-        access_token = load_secret("GETBLOCK_ACCESS_TOKEN", "GETBLOCK_ACCESS_TOKEN_FILE")
+        currency_key = currency.upper()
+        access_token = load_secret(
+            f"GETBLOCK_ACCESS_TOKEN_{currency_key}",
+            f"GETBLOCK_ACCESS_TOKEN_{currency_key}_FILE"
+        )
+        if not access_token:
+            access_token = load_secret("GETBLOCK_ACCESS_TOKEN", "GETBLOCK_ACCESS_TOKEN_FILE")
         if not access_token:
             raise ValueError(
                 "GETBLOCK_ACCESS_TOKEN environment variable not set. "

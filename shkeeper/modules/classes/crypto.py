@@ -19,6 +19,11 @@ class Crypto(abc.ABC):
         if inspect.isabstract(cls):
             return
 
+        if cls.__name__ == "btc" and os.environ.get("BTC_ADDRESS_SOURCE", "").lower() == "hdwallet":
+            return
+        if cls.__name__ == "ltc" and os.environ.get("LTC_ADDRESS_SOURCE", "").lower() == "hdwallet":
+            return
+
         # use class name, not file name!
         default_off = [
             # Tron

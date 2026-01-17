@@ -10,11 +10,7 @@ class ltc(BitcoinLikeCrypto):
         return "Litecoin"
 
     def gethost(self):
-        # Use environment variable or fallback to default
-        rpc_url = environ.get('LTC_RPC_URL', 'litecoind:9332')
-        # Remove https:// if present (for GetBlock.io compatibility)
-        if rpc_url.startswith('https://'):
-            # For HTTPS RPC, we need to return host without protocol
-            # GetBlock.io URL: https://go.getblock.io/TOKEN/
-            return rpc_url.replace('https://', '').replace('http://', '')
+        rpc_url = environ.get("LTC_RPC_URL", "litecoind:9332")
+        if rpc_url.startswith("https://"):
+            return rpc_url.replace("https://", "").replace("http://", "")
         return rpc_url
