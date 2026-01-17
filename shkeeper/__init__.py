@@ -19,7 +19,7 @@ import requests
 
 from shkeeper.wallet_encryption import WalletEncryptionRuntimeStatus
 
-from .utils import format_decimal
+from .utils import format_decimal, load_secret, read_env_bool
 from .events import shkeeper_initialized
 
 from flask_apscheduler import APScheduler
@@ -44,6 +44,25 @@ import flask_migrate
 migrate = flask_migrate.Migrate()
 
 
+def _build_sqlalchemy_database_uri() -> str | None:
+    explicit_uri = os.environ.get("SQLALCHEMY_DATABASE_URI")
+    if explicit_uri:
+        return explicit_uri
+
+    db_user = os.environ.get("DB_USER") or os.environ.get("POSTGRES_USER")
+    db_password = load_secret("DB_PASSWORD", "DB_PASSWORD_FILE") or load_secret(
+        "POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE"
+    )
+    db_host = os.environ.get("DB_HOST", "db")
+    db_port = os.environ.get("DB_PORT", "5432")
+    db_name = os.environ.get("DB_NAME") or os.environ.get("POSTGRES_DB") or "shkeeper"
+
+    if not (db_user and db_password and db_host and db_name):
+        return None
+
+    return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+
 def internal_server_error(e):
     return render_template("500.j2", theme=request.cookies.get("theme", "light")), 500
 
@@ -55,34 +74,37 @@ def page_not_found_error(e):
 def create_app(test_config=None):
     """Create and configure an instance of the Flask application."""
     app = Flask(__name__, instance_relative_config=True)
+    secret_key = load_secret("SECRET_KEY", "SECRET_KEY_FILE")
+    if not secret_key:
+        secret_key = load_secret("SHKEEPER_SECRET_KEY", "SHKEEPER_SECRET_KEY_FILE")
+
+    database_uri = _build_sqlalchemy_database_uri()
     app.config.from_mapping(
         # a default secret that should be overridden by instance config
-        SECRET_KEY="dev",
+        SECRET_KEY=secret_key or "dev",
         # store the database in the instance folder
         DATABASE=os.path.join(app.instance_path, "shkeeper.sqlite"),
-        SQLALCHEMY_DATABASE_URI="sqlite:///"
-        + os.path.join(app.instance_path, "shkeeper.sqlite"),
+        SQLALCHEMY_DATABASE_URI=database_uri
+        or "sqlite:///" + os.path.join(app.instance_path, "shkeeper.sqlite"),
         SUGGESTED_WALLET_APIKEY=secrets.token_urlsafe(16),
         SESSION_TYPE="filesystem",
         SESSION_FILE_DIR=os.path.join(app.instance_path, "flask_session"),
-        TRON_MULTISERVER_GUI=bool(os.environ.get("TRON_MULTISERVER_GUI")),
-        TRON_STAKING_GUI=bool(os.environ.get("TRON_STAKING_GUI")),
-        FORCE_WALLET_ENCRYPTION=bool(os.environ.get("FORCE_WALLET_ENCRYPTION")),
-        UNCONFIRMED_TX_NOTIFICATION=bool(os.environ.get("UNCONFIRMED_TX_NOTIFICATION")),
+        TRON_MULTISERVER_GUI=read_env_bool("TRON_MULTISERVER_GUI"),
+        TRON_STAKING_GUI=read_env_bool("TRON_STAKING_GUI"),
+        FORCE_WALLET_ENCRYPTION=read_env_bool("FORCE_WALLET_ENCRYPTION"),
+        UNCONFIRMED_TX_NOTIFICATION=read_env_bool("UNCONFIRMED_TX_NOTIFICATION"),
         REQUESTS_TIMEOUT=int(os.environ.get("REQUESTS_TIMEOUT", 10)),
         REQUESTS_NOTIFICATION_RETRIES=int(os.environ.get("MAX_RETRIES", 7)),
         REQUESTS_NOTIFICATION_TIMEOUT=int(
             os.environ.get("REQUESTS_NOTIFICATION_TIMEOUT", 30)
         ),
-        DEV_MODE=bool(os.environ.get("DEV_MODE", False)),
+        DEV_MODE=read_env_bool("DEV_MODE", default=False),
         DEV_MODE_ENC_PW=os.environ.get("DEV_MODE_ENC_PW"),
-        ENABLE_PAYOUT_CALLBACK=bool(os.environ.get("ENABLE_PAYOUT_CALLBACK")),
+        ENABLE_PAYOUT_CALLBACK=read_env_bool("ENABLE_PAYOUT_CALLBACK"),
         MIN_CONFIRMATION_BLOCK_FOR_PAYOUT=os.environ.get("MIN_CONFIRMATION_BLOCK_FOR_PAYOUT", 1),
         NOTIFICATION_TASK_DELAY=int(os.environ.get("NOTIFICATION_TASK_DELAY", 60)),
         TEMPLATES_AUTO_RELOAD=True,
-        DISABLE_CRYPTO_WHEN_LAGS=bool(
-            os.environ.get("DISABLE_CRYPTO_WHEN_LAGS", False)
-        ),
+        DISABLE_CRYPTO_WHEN_LAGS=read_env_bool("DISABLE_CRYPTO_WHEN_LAGS", default=False),
     )
 
     if test_config is None:

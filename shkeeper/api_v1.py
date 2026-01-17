@@ -13,7 +13,7 @@ from flask import stream_with_context
 from shkeeper.modules.cryptos.btc import Btc
 from flask import current_app as app
 from flask.json import JSONDecoder
-from flask_sqlalchemy import sqlalchemy
+from sqlalchemy.exc import IntegrityError
 from shkeeper import requests
 from shkeeper.services.payout_service import PayoutService
 
@@ -454,7 +454,7 @@ def walletnotify(crypto_name, txid):
                 app.logger.info(f"[{crypto.crypto}/{txid}] TX has been added to db")
                 if not tx.need_more_confirmations:
                     send_notification(tx)
-            except sqlalchemy.exc.IntegrityError as e:
+            except IntegrityError as e:
                 app.logger.warning(f"[{crypto.crypto}/{txid}] TX already exist in db")
                 db.session.rollback()
         return {"status": "success"}
