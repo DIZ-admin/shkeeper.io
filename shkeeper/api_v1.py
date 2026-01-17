@@ -1,4 +1,6 @@
 from decimal import Decimal
+import base64
+import io
 import traceback
 from os import environ
 from concurrent.futures import ThreadPoolExecutor
@@ -37,6 +39,7 @@ from shkeeper.exceptions import NotRelatedToAnyInvoice
 from shkeeper.services.crypto_cache import get_available_cryptos
 from shkeeper.services.balance_service import get_balances
 from functools import wraps
+import segno
 
 bp = Blueprint("api_v1", __name__, url_prefix="/api/v1/")
 
@@ -63,6 +66,55 @@ def list_crypto():
         "status": "success",
         "crypto": data["filtered"],
         "crypto_list": data["crypto_list"],
+    }
+
+
+def _build_payment_uri(invoice):
+    if invoice.crypto == "BTC-LIGHTNING":
+        response = invoice.for_response()
+        return response.get("bip21")
+
+    scheme_map = {
+        "BTC": "bitcoin",
+        "LTC": "litecoin",
+        "DOGE": "dogecoin",
+        "XMR": "monero",
+        "ETH": "ethereum",
+    }
+    scheme = scheme_map.get(invoice.crypto, invoice.crypto.lower())
+    amount = format_decimal(invoice.amount_crypto)
+    if amount:
+        return f"{scheme}:{invoice.addr}?amount={amount}"
+    return f"{scheme}:{invoice.addr}"
+
+
+def _build_qr_base64(uri: str) -> str:
+    qr = segno.make(uri)
+    buffer = io.BytesIO()
+    qr.save(buffer, kind="png", scale=5)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def _serialize_invoice(invoice):
+    status = invoice.status.name.lower() if invoice.status else "pending"
+    payment_uri = _build_payment_uri(invoice)
+    qr_base64 = None
+    if payment_uri:
+        try:
+            qr_base64 = _build_qr_base64(payment_uri)
+        except Exception:
+            qr_base64 = None
+
+    return {
+        "invoice_id": str(invoice.id),
+        "external_id": invoice.external_id,
+        "crypto_address": invoice.addr,
+        "crypto_amount": format_decimal(invoice.amount_crypto),
+        "crypto_currency": invoice.crypto,
+        "fiat_currency": invoice.fiat,
+        "status": status,
+        "qr_uri": payment_uri,
+        "qr_code_base64": qr_base64,
     }
 
 @bp.get("/crypto/balances")
@@ -125,6 +177,49 @@ def payment_request(crypto_name):
         }
 
     return response
+
+
+@bp.post("/invoice")
+@api_key_required
+def create_invoice():
+    req = request.get_json(force=True)
+    try:
+        crypto_name = (req.get("crypto") or req.get("crypto_currency") or "").upper()
+        if not crypto_name:
+            return {"status": "error", "message": "crypto is required"}, 400
+
+        try:
+            crypto = Crypto.instances[crypto_name]
+        except KeyError:
+            return {"status": "error", "message": f"{crypto_name} payment gateway is unavailable"}, 400
+
+        invoice = Invoice.add(crypto=crypto, request=req)
+        response = _serialize_invoice(invoice)
+        response["status"] = "pending"
+        app.logger.info({"request": req, "response": response})
+        return response
+
+    except Exception as e:
+        app.logger.exception(f"Failed to create invoice for {req}")
+        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}, 500
+
+
+@bp.get("/invoice/<invoice_id>")
+@api_key_required
+def get_invoice(invoice_id):
+    try:
+        numeric_id = invoice_id.replace("inv_", "")
+        invoice = Invoice.query.filter_by(id=int(numeric_id)).first()
+        if not invoice:
+            return {"status": "error", "message": "Invoice not found"}, 404
+
+        response = _serialize_invoice(invoice)
+        app.logger.info({"invoice_id": invoice_id, "response": response})
+        return response
+
+    except Exception as e:
+        app.logger.exception(f"Failed to fetch invoice {invoice_id}")
+        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}, 500
 
 @bp.post("/<crypto_name>/quote")
 @api_key_required
