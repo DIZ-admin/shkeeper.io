@@ -20,8 +20,14 @@ COPY . .
 RUN pip3 install --no-cache-dir -r requirements.txt && \
     pip3 install --no-cache-dir psycopg2-binary
 
-# Create instance directory for data
-RUN mkdir -p /shkeeper.io/instance
+# Keep filesystem-backed sessions and instance config writable by the unprivileged runtime.
+RUN groupadd --gid 1000 shkeeper \
+    && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /shkeeper.io --shell /usr/sbin/nologin shkeeper \
+    && mkdir -p /shkeeper.io/instance \
+    && chown -R 1000:1000 /shkeeper.io
+
+ENV HOME=/shkeeper.io
+USER 1000:1000
 
 # Expose port
 EXPOSE 5000
