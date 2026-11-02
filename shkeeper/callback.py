@@ -1,4 +1,8 @@
 import click
+import hashlib
+import hmac
+import json
+import time
 from shkeeper import requests
 
 from flask import Blueprint, json
@@ -13,10 +17,29 @@ bp = Blueprint("callback", __name__)
 DEFAULT_CURRENCY = 'USD'
 
 
-def send_unconfirmed_notification(utx: UnconfirmedTransaction):
-    app.logger.info(
-        f"send_unconfirmed_notification started for {utx.crypto} {utx.txid}, {utx.addr}, {utx.amount_crypto}"
+def _post_signed_callback(url, notification, apikey):
+    timestamp = str(int(time.time()))
+    body = json.dumps(notification, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    signature = hmac.new(
+        apikey.encode("utf-8"),
+        timestamp.encode("ascii") + b"." + body,
+        hashlib.sha256,
+    ).hexdigest()
+    return requests.post(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Shkeeper-Api-Key": apikey,
+            "X-Shkeeper-Timestamp": timestamp,
+            "X-Shkeeper-Signature": signature,
+        },
+        timeout=app.config.get("REQUESTS_NOTIFICATION_TIMEOUT"),
     )
+
+
+def send_unconfirmed_notification(utx: UnconfirmedTransaction):
+    app.logger.info("Processing unconfirmed SHKeeper payment callback")
 
     invoice_address = InvoiceAddress.query.filter_by(
         crypto=utx.crypto, addr=utx.addr
@@ -34,39 +57,26 @@ def send_unconfirmed_notification(utx: UnconfirmedTransaction):
         "amount": format_decimal(utx.amount_crypto, precision=crypto.precision),
     }
 
-    app.logger.warning(
-        f"[{utx.crypto}/{utx.txid}] Posting {notification} to {invoice.callback_url} with api key {apikey}"
-    )
+    app.logger.info("Posting unconfirmed SHKeeper payment callback")
     try:
-        r = requests.post(
-            invoice.callback_url,
-            json=notification,
-            headers={"X-Shkeeper-Api-Key": apikey},
-            timeout=app.config.get("REQUESTS_NOTIFICATION_TIMEOUT"),
-        )
+        r = _post_signed_callback(invoice.callback_url, notification, apikey)
     except Exception as e:
-        app.logger.error(
-            f"[{utx.crypto}/{utx.txid}] Unconfirmed TX notification failed: {e}"
-        )
+        app.logger.error("Unconfirmed SHKeeper callback failed (%s)", type(e).__name__)
         return False
 
     if r.status_code != 202:
-        app.logger.warning(
-            f"[{utx.crypto}/{utx.txid}] Unconfirmed TX notification failed with HTTP code {r.status_code}"
-        )
+        app.logger.warning("Unconfirmed SHKeeper callback returned HTTP %s", r.status_code)
         return False
 
     utx.callback_confirmed = True
     db.session.commit()
-    app.logger.info(
-        f"[{utx.crypto}/{utx.txid}] Unconfirmed TX notification has been accepted"
-    )
+    app.logger.info("Unconfirmed SHKeeper callback accepted")
 
     return True
 
 
 def send_notification(tx):
-    app.logger.info(f"[{tx.crypto}/{tx.txid}] Notificator started")
+    app.logger.info("Processing SHKeeper payment callback")
 
     transactions = []
     for t in tx.invoice.transactions:
@@ -111,31 +121,20 @@ def send_notification(tx):
     )
 
     apikey = Crypto.instances[tx.crypto].wallet.apikey
-    app.logger.warning(
-        f"[{tx.crypto}/{tx.txid}] Posting {json.dumps(notification)} to {tx.invoice.callback_url} with api key {apikey}"
-    )
+    app.logger.info("Posting SHKeeper payment callback")
     try:
-        r = requests.post(
-            tx.invoice.callback_url,
-            json=notification,
-            headers={"X-Shkeeper-Api-Key": apikey},
-            timeout=app.config.get("REQUESTS_NOTIFICATION_TIMEOUT"),
-        )
+        r = _post_signed_callback(tx.invoice.callback_url, notification, apikey)
     except Exception as e:
-        app.logger.error(f"[{tx.crypto}/{tx.txid}] Notification failed: {e}")
+        app.logger.error("SHKeeper payment callback failed (%s)", type(e).__name__)
         return False
 
     if r.status_code != 202:
-        app.logger.warning(
-            f"[{tx.crypto}/{tx.txid}] Notification failed by {tx.invoice.callback_url} with HTTP code {r.status_code}"
-        )
+        app.logger.warning("SHKeeper payment callback returned HTTP %s", r.status_code)
         return False
 
     tx.callback_confirmed = True
     db.session.commit()
-    app.logger.info(
-        f"[{tx.crypto}/{tx.txid}] Notification has been accepted by {tx.invoice.callback_url}"
-    )
+    app.logger.info("SHKeeper payment callback accepted")
     return True
 
 
@@ -151,9 +150,7 @@ def send_callbacks():
         try:
             send_unconfirmed_notification(utx)
         except Exception as e:
-            app.logger.exception(
-                f"Exception while sending callback for UTX {utx.crypto}/{utx.txid}"
-            )
+            app.logger.error("Payment workflow operation failed")
 
     for tx in Transaction.query.filter_by(
         callback_confirmed=False, need_more_confirmations=False
@@ -163,23 +160,17 @@ def send_callbacks():
                 seconds=app.config.get("NOTIFICATION_TASK_DELAY")
             )
             if datetime.now() > delay_until_date:
-                app.logger.info(
-                    f"[{tx.crypto}/{tx.txid}] created at {tx.created_at}, delayed until {delay_until_date}"
-                )
+                app.logger.info("Payment workflow event")
                 if tx.invoice.status == InvoiceStatus.OUTGOING:
                     tx.callback_confirmed = True
                     db.session.commit()
                 else:
-                    app.logger.info(f"[{tx.crypto}/{tx.txid}] Notification is pending")
+                    app.logger.info("Payment workflow event")
                     send_notification(tx)
             else:
-                app.logger.info(
-                    f"[{tx.crypto}/{tx.txid}] delaying notification created at {tx.created_at} until {delay_until_date}"
-                )
+                app.logger.info("Payment workflow event")
         except Exception as e:
-            app.logger.exception(
-                f"Exception while sending callback for TX {tx.crypto}/{tx.txid}"
-            )
+            app.logger.error("Payment workflow operation failed")
 
 def poll_unconfirmed_payouts():
     app.logger.info("poll_unconfirmed_payouts start")
@@ -193,9 +184,9 @@ def poll_unconfirmed_payouts():
         )
         .all()
     )
-    app.logger.info(f"poll_unconfirmed_payouts finished {payouts}")
+    app.logger.info("Payment workflow event")
     for payout in payouts:
-        app.logger.info(f"poll_unconfirmed_payouts payout {payout}")
+        app.logger.info("Payment workflow event")
         crypto = Crypto.instances.get(payout.crypto)
         if not crypto:
             continue
@@ -203,12 +194,12 @@ def poll_unconfirmed_payouts():
         tx_to_notify = None
         for tx in payout.transactions:
             if not tx or not getattr(tx, "txid", None):
-                app.logger.warning(f"Skipping invalid transaction {tx}")
+                app.logger.warning("Payment workflow item skipped")
                 continue
             try:
-                app.logger.info(f"poll_unconfirmed_payouts get_confirmations_by_txid {tx.txid}")
+                app.logger.info("Payment workflow event")
                 confirmations = crypto.get_confirmations_by_txid(tx.txid)
-                app.logger.info(f"poll_unconfirmed_payouts confirmations {confirmations}")
+                app.logger.info("Payment workflow event")
             except Exception:
                 continue
             if confirmations > int(app.config.get("MIN_CONFIRMATION_BLOCK_FOR_PAYOUT")):
@@ -216,12 +207,12 @@ def poll_unconfirmed_payouts():
                 if not tx_to_notify:
                     tx_to_notify = tx
         if all_confirmed:
-            app.logger.info(f"poll_unconfirmed_payouts all_confirmed {payout}")
-            app.logger.info(f"poll_unconfirmed_payouts tx_to_notify {tx_to_notify}")
+            app.logger.info("Payment workflow event")
+            app.logger.info("Payment workflow event")
             payout.status = PayoutStatus.SUCCESS
             payout.success = "Yes"
             if payout.callback_url and tx_to_notify and app.config.get("ENABLE_PAYOUT_CALLBACK"):
-                app.logger.info(f"Notification create {tx_to_notify}")
+                app.logger.info("Payment workflow event")
                 notification = Notification(
                     txid=tx_to_notify.txid,
                     object_id=payout.id,
@@ -247,19 +238,16 @@ def send_payout_callback_notifier():
         if now < next_try_time:
             continue
         try:
-            app.logger.info(f"[PAYOUT {notif.object_id}] Sending payout callback try={retries}")
+            app.logger.info("Payment workflow event")
             success = send_payout_notification(notif)
             if not success:
                 notif.retries = retries + 1
                 db.session.commit()
-                app.logger.info(
-                    f"[PAYOUT {notif.object_id}] Retry #{retries+1}. "
-                    f"Next in {(retries+2)**2} sec"
-                )
+                app.logger.info("Payment workflow event")
         except Exception:
             notif.retries = retries + 1
             db.session.commit()
-            app.logger.exception(f"Exception while sending payout callback object_id={notif.object_id}")
+            app.logger.error("Payment workflow operation failed")
 
 def send_payout_notification(notif: Notification):
     payout = Payout.query.get(notif.object_id)
@@ -271,7 +259,7 @@ def send_payout_notification(notif: Notification):
     tx = payout.transactions[0] if payout.transactions else None
     tx_hash = tx.txid if tx else None
     if not tx_hash:
-        app.logger.info(f"[PAYOUT {payout.id}] No tx_hash yet — skipping callback")
+        app.logger.info("Payment workflow event")
         return False
     rate = ExchangeRate.get(DEFAULT_CURRENCY, payout.crypto).get_rate()
     amount_fiat = payout.amount * rate
@@ -289,7 +277,7 @@ def send_payout_notification(notif: Notification):
 
     retries = getattr(notif, "retries", 0)
     wait = (retries + 1) ** 2
-    app.logger.info(f"[PAYOUT {payout.id}] Sending webhook try={retries}, wait={wait}s")
+    app.logger.info("Payment workflow event")
 
     try:
         r = requests.post(
@@ -298,7 +286,7 @@ def send_payout_notification(notif: Notification):
             timeout=app.config.get("REQUESTS_NOTIFICATION_TIMEOUT", 10),
         )
     except Exception as e:
-        notif.message = str(e)
+        notif.message = f"Callback delivery failed ({type(e).__name__})"
         notif.retries = retries + 1
         db.session.commit()
         return False
@@ -312,12 +300,12 @@ def send_payout_notification(notif: Notification):
     # Success
     notif.callback_confirmed = True
     db.session.commit()
-    app.logger.info(f"[PAYOUT {payout.id}] Webhook delivered successfully")
+    app.logger.info("Payment workflow event")
     return True
 
 def poll_all_pending_payouts():
     cutoff = datetime.utcnow() - timedelta(days=1)
-    app.logger.info(f"poll_all_pending_payout start")
+    app.logger.info("Payment workflow event")
     pending_payouts = (
         Payout.query
         .filter(
@@ -327,19 +315,19 @@ def poll_all_pending_payouts():
         )
         .all()
     )
-    app.logger.info(f"poll_all_pending_payout pending_payouts {pending_payouts}")
+    app.logger.info("Payment workflow event")
     for payout in pending_payouts:
-        app.logger.info(f"poll_all_pending_payout payout {payout}")
+        app.logger.info("Payment workflow event")
         crypto = Crypto.instances.get(payout.crypto)
         if not crypto:
             continue
         task_response = crypto.get_task(payout.task_id)
         status = task_response.get("status")
-        app.logger.info(f"poll_all_pending_payout task_response {task_response}")
+        app.logger.info("Payment workflow event")
         if status in ("SUCCESS", "ERROR", "FAILED", "FAILURE"):
-            app.logger.info(f"update_from_task")
-            app.logger.info(f"update_from_task {task_response}")
-            app.logger.info(f"update_from_task {payout.task_id}")
+            app.logger.info("Payment workflow event")
+            app.logger.info("Payment workflow event")
+            app.logger.info("Payment workflow event")
             Payout.update_from_task(task_response, payout.task_id)
     db.session.commit()
 
@@ -348,15 +336,13 @@ def update_confirmations():
         callback_confirmed=False, need_more_confirmations=True
     ):
         try:
-            app.logger.info(f"[{tx.crypto}/{tx.txid}] Updating confirmations")
+            app.logger.info("Payment workflow event")
             if not tx.is_more_confirmations_needed():
-                app.logger.info(f"[{tx.crypto}/{tx.txid}] Got enough confirmations")
+                app.logger.info("Payment workflow event")
             else:
-                app.logger.info(f"[{tx.crypto}/{tx.txid}] Not enough confirmations yet")
+                app.logger.info("Payment workflow event")
         except Exception as e:
-            app.logger.exception(
-                f"Exception while updating tx confirmations for {tx.crypto}/{tx.txid}"
-            )
+            app.logger.error("Payment workflow operation failed")
 
 
 @bp.cli.command()

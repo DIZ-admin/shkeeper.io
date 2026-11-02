@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,8 +17,7 @@ WORKDIR /shkeeper.io
 COPY . .
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt && \
-    pip3 install --no-cache-dir psycopg2-binary
+RUN pip3 install --no-cache-dir --require-hashes -r requirements.lock
 
 # Keep filesystem-backed sessions and instance config writable by the unprivileged runtime.
 RUN groupadd --gid 1000 shkeeper \

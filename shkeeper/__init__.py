@@ -5,6 +5,7 @@ import secrets
 from decimal import Decimal
 import shutil
 import threading
+from pathlib import Path
 
 from flask import logging as flog, render_template, request
 
@@ -50,9 +51,22 @@ def _build_sqlalchemy_database_uri() -> str | None:
         return explicit_uri
 
     db_user = os.environ.get("DB_USER") or os.environ.get("POSTGRES_USER")
-    db_password = load_secret("DB_PASSWORD", "DB_PASSWORD_FILE") or load_secret(
-        "POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE"
+    password_file = os.environ.get("DB_PASSWORD_FILE") or os.environ.get(
+        "POSTGRES_PASSWORD_FILE"
     )
+    if password_file:
+        try:
+            db_password = Path(password_file).read_text().strip()
+        except OSError as exc:
+            raise RuntimeError(
+                "Configured database password file is unavailable"
+            ) from exc
+        if not db_password:
+            raise RuntimeError("Configured database password file is empty")
+    else:
+        db_password = os.environ.get("DB_PASSWORD") or os.environ.get(
+            "POSTGRES_PASSWORD"
+        )
     db_host = os.environ.get("DB_HOST", "db")
     db_port = os.environ.get("DB_PORT", "5432")
     db_name = os.environ.get("DB_NAME") or os.environ.get("POSTGRES_DB") or "shkeeper"

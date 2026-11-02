@@ -33,7 +33,6 @@ Copy `.env.example` to `.env` and set SHKeeper variables:
 ```bash
 # Generate secret keys
 python -c "import secrets; print('SHKEEPER_SECRET_KEY=' + secrets.token_urlsafe(32))"
-python -c "import secrets; print('SHKEEPER_WEBHOOK_SECRET=' + secrets.token_hex(32))"
 ```
 
 Add to `.env`:
@@ -41,7 +40,7 @@ Add to `.env`:
 SHKEEPER_PORT=5000
 SHKEEPER_SECRET_KEY=<generated_secret>
 SHKEEPER_DEV_MODE=1
-SHKEEPER_WEBHOOK_SECRET=<generated_secret>
+SHKEEPER_API_KEY=<wallet API key provisioned in SHKeeper Wallets → Manage>
 ```
 
 ### 2. Initialize SHKeeper Database
@@ -77,7 +76,7 @@ docker compose logs -f shkeeper
 
 - **API**: http://localhost:5001/api/v1/crypto (port 5001 by default, see .env)
 - **Web Interface**: http://localhost:5001
-- **Default Credentials**: admin/admin (change in production!)
+- **Administrator credentials**: use the unique credentials provisioned for this deployment; never rely on defaults.
 - **Webhook Endpoint**: http://localhost:9090/webhooks/shkeeper (bot receives notifications here)
 
 ## API Endpoints Used by Bot
@@ -101,49 +100,22 @@ Response:
 ```
 
 ### Create Invoice
+
+SHKeeper's canonical invoice API uses the cryptocurrency in the path and returns id, amount, and wallet:
+
 ```bash
-curl -X POST http://localhost:5001/api/v1/invoice \
-  -H "X-Shkeeper-API-Key: your_api_key" \
+curl -X POST http://localhost:5001/api/v1/BTC/payment_request \
+  -H "X-Shkeeper-Api-Key: $SHKEEPER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "external_id": "ORDER-ABC123",
     "fiat": "USD",
     "amount": "100.00",
-    "crypto": "BTC",
-    "callback_url": "http://bot:9090/webhooks/shkeeper"
+    "callback_url": "http://eshop_bot:9090/webhooks/shkeeper"
   }'
 ```
 
-Response:
-```json
-{
-  "invoice_id": "inv_abc123",
-  "crypto_address": "bc1q...",
-  "crypto_amount": "0.00123456",
-  "crypto_currency": "BTC",
-  "status": "pending",
-  "expires_at": "2026-01-19T12:00:00Z"
-}
-```
-
-### Get Invoice Status
-```bash
-curl http://localhost:5001/api/v1/invoice/inv_abc123 \
-  -H "X-Shkeeper-API-Key: your_api_key"
-```
-
-Response:
-```json
-{
-  "invoice_id": "inv_abc123",
-  "external_id": "ORDER-ABC123",
-  "status": "paid",
-  "crypto_currency": "BTC",
-  "crypto_amount": "0.00123456",
-  "tx_hash": "abc123...",
-  "confirmations": 3
-}
-```
+The provider returns an invoice id, payment amount, and wallet address. SHKeeper supports lookup by the merchant external ID at `GET /api/v1/invoices/{external_id}`; payment status also arrives through signed callbacks.
 
 ## Configuration
 
@@ -154,8 +126,7 @@ Response:
 | `SHKEEPER_PORT` | API port | 5000 |
 | `SHKEEPER_SECRET_KEY` | Flask secret key | Required |
 | `SHKEEPER_DEV_MODE` | Development mode | 1 |
-| `SHKEEPER_API_KEY` | API key | Auto-generated |
-| `SHKEEPER_WEBHOOK_SECRET` | Webhook HMAC secret | Required |
+| `SHKEEPER_API_KEY` | Wallet API key for API auth and callback HMAC | Provisioned in SHKeeper |
 | `SQLALCHEMY_DATABASE_URI` | PostgreSQL connection | Auto-configured |
 
 ### Database
@@ -180,29 +151,26 @@ client = SHKeeperClient(
 
 # Create invoice
 invoice = await client.create_invoice(
-    amount=Decimal("0.001"),
-    currency="BTC",
-    order_id="ABC123",
-    callback_url="http://bot:9090/webhooks/shkeeper"
+    amount=Decimal("100.00"),
+    fiat_currency="USD",
+    crypto_currency="BTC",
+    order_code="ABC123",
+    callback_url="http://eshop_bot:9090/webhooks/shkeeper"
 )
 ```
 
 ### 2. Webhook Handler
 
-SHKeeper sends payment notifications to: `POST http://bot:9090/webhooks/shkeeper`
+SHKeeper sends payment notifications to the bot at http://eshop_bot:9090/webhooks/shkeeper.
 
 Handler location: `bot/handlers/webhooks/shkeeper_webhook.py`
 
-**Webhook Events:**
-- `paid` - Payment received in mempool (0 confirmations)
-- `confirmed` - Payment confirmed in blockchain (order status → confirmed)
-- `expired` - Invoice expired without payment (inventory released)
-- `failed` - Payment failed (underpayment, etc., inventory released)
+**Provider callback states:** UNCONFIRMED, PARTIAL, PAID, and OVERPAID. The bot maps these into internal payment-event states and sends partial, overpaid, or unmatched payments to manual review.
 
 **Security:**
 - Webhook signature verification via HMAC-SHA256
-- Uses `SHKEEPER_WEBHOOK_SECRET` from .env
-- Signature sent in `X-SHKeeper-Signature` header (format: "sha256=<hex>")
+- Verifies timestamped HMAC using the wallet API key configured as `SHKEEPER_API_KEY`
+- Requires `X-Shkeeper-Timestamp` and lowercase-hex `X-Shkeeper-Signature`, signing the exact raw request body
 - In dev mode (`SHKEEPER_DEV_MODE=1`), signature verification is skipped
 
 ### 3. Database Integration
@@ -225,7 +193,7 @@ crypto_confirmations     # Blockchain confirmations
 For development/testing, configure Bitcoin testnet wallet:
 
 1. Access SHKeeper admin panel: http://localhost:5000
-2. Login with admin/admin
+2. Login with the configured administrator credentials
 3. Navigate to Wallets → Add Wallet
 4. Select "Bitcoin Testnet"
 5. Configure wallet parameters:
@@ -271,11 +239,7 @@ docker compose exec db psql -U eshop_user -c "\l" | grep shkeeper
 
 ### API returns 401 Unauthorized
 
-Check API key configuration:
-1. SHKeeper generates API key on first run
-2. Copy from SHKeeper logs or web interface
-3. Add to .env: `SHKEEPER_API_KEY=<key>`
-4. Restart bot: `docker compose restart bot`
+Provision the API key into the root-owned SHKEEPER_API_KEY_FILE used by the bot. Do not display it, inspect container environments, or copy it from logs. Restart the bot after updating the protected secret file.
 
 ## Checkout Flow Integration
 
@@ -287,7 +251,7 @@ When user selects cryptocurrency payment:
    - Order total in fiat (USD/RUB)
    - Selected cryptocurrency
    - Order code as `external_id`
-   - Webhook URL: `http://bot:9090/webhooks/shkeeper`
+   - Webhook URL: `http://eshop_bot:9090/webhooks/shkeeper`
 4. **Payment Display**: Bot shows QR code and payment address to user
 5. **Order Creation**: Bot creates Order record with:
    - `shkeeper_invoice_id` = invoice ID
@@ -330,11 +294,11 @@ python bot_cli.py settings set shkeeper_enabled false
 
 ### Security Checklist
 
-- [ ] Change default SHKeeper admin password (http://localhost:5001)
+- [ ] Set unique SHKeeper administrator credentials before making the UI reachable; do not rely on defaults.
 - [ ] Set `SHKEEPER_DEV_MODE=0` in .env
 - [ ] Generate strong `SHKEEPER_SECRET_KEY` (32+ bytes)
-- [ ] Generate strong `SHKEEPER_WEBHOOK_SECRET` (32+ bytes)
-- [ ] Enable HTTPS for webhook callbacks (if SHKeeper is external)
+- [ ] Provision `SHKEEPER_API_KEY` from the intended SHKeeper wallet and keep it in the protected secret file.
+- [ ] Keep callbacks on the internal Docker network; expose any management interface only behind the authenticated TLS proxy.
 - [ ] Configure wallet encryption in SHKeeper UI
 - [ ] Backup wallet private keys securely (hardware wallet recommended)
 - [ ] Set up monitoring and alerting (see Monitoring section)
@@ -358,4 +322,4 @@ Integrate with existing monitoring dashboard at port 9090.
 - **SHKeeper Documentation**: https://shkeeper.io/kb/
 - **SHKeeper API**: https://shkeeper.io/api/
 - **GitHub Repository**: https://github.com/vsys-host/shkeeper.io
-- **Demo**: https://demo.shkeeper.io (admin/admin)
+- **Demo**: https://demo.shkeeper.io (the configured administrator credentials)
