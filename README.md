@@ -51,7 +51,7 @@ This directory contains the SHKeeper cryptocurrency payment gateway integration 
    docker logs eshop_shkeeper -f
    ```
 
-4. **Configure wallets**: http://localhost:5001 (admin/admin)
+4. **Configure wallets**: http://localhost:5001 (configured administrator credentials)
 
 5. **Enable feature**:
    ```bash
@@ -237,7 +237,7 @@ docker compose restart bot
 - **SHKeeper Documentation**: https://shkeeper.io/kb/
 - **SHKeeper API**: https://shkeeper.io/api/
 - **GitHub**: https://github.com/vsys-host/shkeeper.io
-- **Demo**: https://demo.shkeeper.io (admin/admin)
+- **Demo**: https://demo.shkeeper.io (configured administrator credentials)
 
 ## License
 
