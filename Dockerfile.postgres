@@ -28,6 +28,11 @@ RUN groupadd --gid 1000 shkeeper \
 ENV HOME=/shkeeper.io
 USER 1000:1000
 
+ARG DIZ_SOURCE_REVISION=unknown
+ARG DIZ_SOURCE_FINGERPRINT=unknown
+LABEL org.opencontainers.image.revision="${DIZ_SOURCE_REVISION}" \
+      io.diz.eshop.source-fingerprint="${DIZ_SOURCE_FINGERPRINT}"
+
 # Expose port
 EXPOSE 5000
 

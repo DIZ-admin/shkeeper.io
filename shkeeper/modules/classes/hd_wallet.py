@@ -7,7 +7,7 @@ Supports Bitcoin and Litecoin with thread-safe address derivation from encrypted
 Architecture:
     - Encrypted seed phrase stored in hd_seed.enc (mounted read-only)
     - Addresses derived on-demand using BIP44 derivation paths
-    - Thread-safe index allocation prevents address reuse
+    - PostgreSQL wallet-row locking persists address indexes across workers and restarts
     - No private keys stored on disk (derived from seed as needed)
 
 BIP44 Derivation Paths:
@@ -18,13 +18,12 @@ Security:
     - Seed encrypted with Fernet (AES-128-CBC + HMAC)
     - Encryption key from HD_WALLET_ENCRYPTION_KEY environment variable
     - Private keys never logged or stored permanently
-    - Thread-safe to prevent race conditions
+    - Allocation commits with its owning invoice/address transaction
 """
 
+import hashlib
 import logging
 import os
-import threading
-from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -34,6 +33,7 @@ from bitcoinlib.networks import Network
 from cryptography.fernet import Fernet, InvalidToken
 
 from shkeeper.utils import load_secret
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,18 +63,17 @@ LITECOIN_NETWORKS = {
 
 class HDWalletProvider:
     """
-    Thread-safe HD wallet address derivation provider.
+    HD address derivation with transaction-owned persistent index allocation.
 
     This class manages HD wallet address generation from an encrypted BIP39 seed phrase.
-    It maintains per-currency index counters to ensure unique addresses and uses
-    threading.Lock() for thread safety during concurrent invoice creation.
+    Next indexes live in Setting, scoped by public master identity, currency and
+    network. The existing Wallet row serializes allocation, including first use.
+    The caller must commit before publishing a generated address.
 
     Attributes:
         currency: Cryptocurrency ticker (BTC, LTC)
         network: Network name (mainnet, testnet)
         master_key: Root HDKey derived from seed phrase
-        _lock: Class-level thread lock for index allocation
-        _index_counters: Class-level index tracking {currency: current_index}
 
     Example:
         >>> provider = HDWalletProvider(
@@ -83,24 +82,22 @@ class HDWalletProvider:
         ...     encryption_key="<fernet-key>",
         ...     network="mainnet"
         ... )
-        >>> address, index = provider.derive_next_address()
-        >>> print(f"Address: {address}, Index: {index}")
-        Address: bc1q..., Index: 0
+        >>> from shkeeper import db
+        >>> # Use the existing initialized SHKeeper app; publish only after commit.
+        >>> with app.app_context(), db.session.begin():
+        ...     address, index = provider.derive_next_address()
+
+    Construction and derive_address_at_index() are offline operations. Runtime
+    allocation and get_current_index() require the initialized app/DB context
+    and a registered Wallet. Prefer Invoice.add(), which owns the invoice commit.
     """
-
-    # Class-level thread lock (shared across all instances)
-    _lock = threading.Lock()
-
-    # Class-level index counters (shared across all instances)
-    # Format: {currency: current_index}
-    _index_counters = {}
 
     def __init__(
         self,
         currency: str,
         seed_file: str,
         encryption_key: str,
-        network: str = "mainnet"
+        network: str = "mainnet",
     ):
         """
         Initialize HD wallet provider.
@@ -123,7 +120,9 @@ class HDWalletProvider:
             )
 
         if network not in ("mainnet", "testnet"):
-            raise ValueError(f"Invalid network: {network}. Must be 'mainnet' or 'testnet'")
+            raise ValueError(
+                f"Invalid network: {network}. Must be 'mainnet' or 'testnet'"
+            )
 
         self.currency = currency
         self.network = network
@@ -131,14 +130,7 @@ class HDWalletProvider:
         # Load and decrypt seed phrase
         self._load_master_key(seed_file, encryption_key)
 
-        # Initialize index counter for this currency (if not already initialized)
-        with self._lock:
-            if currency not in self._index_counters:
-                self._index_counters[currency] = 0
-
-        logger.info(
-            f"HD wallet provider initialized for {currency} ({network})"
-        )
+        logger.info(f"HD wallet provider initialized for {currency} ({network})")
 
     def _load_master_key(self, seed_file: str, encryption_key: str):
         """
@@ -190,40 +182,59 @@ class HDWalletProvider:
             f"Master key loaded from encrypted seed ({len(seed_phrase.split())} words)"
         )
 
+    def _counter_setting_name(self) -> str:
+        # Public identity survives encryption-key/file changes without retaining seed material.
+        identity = hashlib.sha256(self.master_key.public_byte).hexdigest()
+        return f"HDWalletNextIndex:{self.currency}:{self.network}:{identity}"
+
     def derive_next_address(self) -> Tuple[str, int]:
+        """Allocate under the Wallet row lock in the caller's DB transaction.
+
+        No commit occurs here. Invoice creation commits the counter with its
+        address rows; standalone callers must commit before returning an address.
+        Rollback may reuse an unexposed allocation, never a committed one.
         """
-        Derive next unique address for this currency with thread-safe index allocation.
+        from shkeeper import db
+        from shkeeper.models import Invoice, InvoiceAddress, Setting, Wallet
 
-        This method atomically allocates the next index and derives the corresponding
-        address. Thread safety is critical for concurrent invoice creation.
-
-        Returns:
-            Tuple of (address, index)
-                address: Derived cryptocurrency address
-                index: BIP44 address index used
-
-        Example:
-            >>> address, index = provider.derive_next_address()
-            >>> print(f"Address {index}: {address}")
-            Address 0: bc1q...
-
-        Thread Safety:
-            Uses threading.Lock() to prevent race conditions during index allocation.
-            Lock is held only during index increment (minimal critical section).
-        """
-        # Allocate next index atomically (critical section)
-        with self._lock:
-            index = self._index_counters[self.currency]
-            self._index_counters[self.currency] += 1
-
-        # Derive address outside lock for better performance
-        address = self._derive_address_at_index(index)
-
-        logger.debug(
-            f"Derived {self.currency} address at index {index}: {address}"
+        wallet = (
+            Wallet.query.filter_by(crypto=self.currency).with_for_update().one_or_none()
         )
+        if wallet is None:
+            raise ValueError(
+                f"Wallet must be registered before allocating {self.currency} addresses"
+            )
 
-        return address, index
+        # A long-lived session may already have read this row before waiting for
+        # the wallet lock. Refresh from the database, not its stale identity map.
+        name = self._counter_setting_name()
+        setting = Setting.query.filter_by(name=name).populate_existing().one_or_none()
+        index = int(setting.value) if setting is not None else 0
+        if index < 0 or index >= 2**31:
+            raise ValueError(
+                "HD wallet next index is outside the non-hardened BIP44 range"
+            )
+        if setting is None:
+            setting = Setting(name=name, value=str(index))
+            db.session.add(setting)
+
+        while index < 2**31:
+            address = self._derive_address_at_index(index)
+            # Existing invoices predate persistent counters. Do not allocate an
+            # already recorded address when upgrading an unchanged seed.
+            issued = (
+                InvoiceAddress.query.filter_by(
+                    crypto=self.currency, addr=address
+                ).first()
+                or Invoice.query.filter_by(crypto=self.currency, addr=address).first()
+            )
+            if issued is None:
+                setting.value = str(index + 1)
+                db.session.flush()
+                logger.debug("Allocated %s HD address index %s", self.currency, index)
+                return address, index
+            index += 1
+        raise ValueError("HD wallet non-hardened BIP44 address range exhausted")
 
     def _derive_address_at_index(self, index: int) -> str:
         """
@@ -262,17 +273,15 @@ class HDWalletProvider:
         return address
 
     def get_current_index(self) -> int:
-        """
-        Get current index counter for this currency.
+        """Read the durable cursor in an initialized app/DB context; no allocation or commit."""
+        from shkeeper.models import Setting
 
-        Returns:
-            Current index (next address will use this index)
-
-        Thread Safety:
-            Uses lock to safely read counter value.
-        """
-        with self._lock:
-            return self._index_counters.get(self.currency, 0)
+        setting = (
+            Setting.query.filter_by(name=self._counter_setting_name())
+            .populate_existing()
+            .one_or_none()
+        )
+        return int(setting.value) if setting is not None else 0
 
     def derive_address_at_index(self, index: int) -> str:
         """
@@ -298,7 +307,7 @@ def create_hd_wallet_provider(
     currency: str,
     seed_file: Optional[str] = None,
     encryption_key: Optional[str] = None,
-    network: Optional[str] = None
+    network: Optional[str] = None,
 ) -> HDWalletProvider:
     """
     Create HD wallet provider with defaults from environment.
@@ -310,7 +319,9 @@ def create_hd_wallet_provider(
         network: Network name (default: from GETBLOCK_NETWORK or BTC_NETWORK env, fallback: mainnet)
 
     Returns:
-        Configured HDWalletProvider instance
+        Configured HDWalletProvider instance. Construction and pure index derivation
+        work offline. derive_next_address()/get_current_index() require app/DB
+        context; standalone allocation must commit before publishing its result.
 
     Raises:
         ValueError: If required environment variables not set
@@ -352,5 +363,5 @@ def create_hd_wallet_provider(
         currency=currency,
         seed_file=seed_file,
         encryption_key=encryption_key,
-        network=network
+        network=network,
     )

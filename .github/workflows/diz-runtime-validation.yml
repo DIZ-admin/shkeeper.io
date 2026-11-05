@@ -1,0 +1,36 @@
+name: DIZ runtime validation
+
+on: [push]
+permissions:
+  contents: read
+concurrency:
+  group: diz-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  postgres-runtime:
+    if: github.repository == 'DIZ-admin/shkeeper.io'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.15
+        env:
+          POSTGRES_USER: hd_test
+          POSTGRES_PASSWORD: ephemeral-hd-test
+          POSTGRES_DB: hd_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hd_test -d hd_test"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build the actual PostgreSQL runtime without publishing
+        run: docker build -f Dockerfile.postgres -t shkeeper-runtime-test .
+      - name: Native security and persistent allocation contracts
+        run: |
+          docker run --rm --network host --entrypoint python --user 1000:1000 \
+            -e HOME=/tmp -e BCL_DATA_DIR=/tmp/bitcoinlib \
+            -e SQLALCHEMY_DATABASE_URI=postgresql://hd_test:ephemeral-hd-test@127.0.0.1/hd_test \
+            -v "$PWD:/shkeeper.io:ro" -w /shkeeper.io \
+            shkeeper-runtime-test -m unittest discover -s tests -p 'test_*.py' -v

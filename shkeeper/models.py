@@ -415,7 +415,7 @@ class Invoice(db.Model):
                     invoice.addr = crypto.mkaddr(
                         details={"value": invoice.amount_crypto}
                     )
-                    db.session.commit()
+                    db.session.flush()
                     invoice_address = InvoiceAddress()
                     invoice_address.invoice_id = invoice.id
                     invoice_address.crypto = invoice.crypto
@@ -436,7 +436,7 @@ class Invoice(db.Model):
             )
             invoice.addr = crypto.mkaddr(details={"value": invoice.amount_crypto})
             db.session.add(invoice)
-            db.session.commit()
+            db.session.flush()
 
             invoice_address = InvoiceAddress()
             invoice_address.invoice_id = invoice.id

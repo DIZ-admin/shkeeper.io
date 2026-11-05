@@ -123,14 +123,15 @@ class BtcHDWallet(Btc):
 
         Example:
             >>> module = BtcHDWallet()
-            >>> address = module.mkaddr()
-            >>> print(address)
-            bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+            >>> from shkeeper import db
+            >>> with app.app_context(), db.session.begin():
+            ...     address = module.mkaddr()
+            >>> # Publish only after the transaction block commits.
 
         Notes:
             - Lazy-loads HDWalletProvider on first call
-            - Thread-safe address derivation
-            - Addresses are never reused (auto-increment index)
+            - Database-serialized allocation; the caller owns commit/rollback
+            - Committed address indexes survive process restarts
         """
         # Lazy-load HD wallet provider
         if self.hd_provider is None:
@@ -147,7 +148,7 @@ class BtcHDWallet(Btc):
         # Derive next address
         try:
             address, index = self.hd_provider.derive_next_address()
-            logger.info(f"Generated BTC address at index {index}: {address}")
+            logger.info(f"Allocated BTC HD address index {index} in the caller transaction")
             return address
         except Exception as e:
             logger.error(f"Failed to derive Bitcoin address: {e}", exc_info=True)
