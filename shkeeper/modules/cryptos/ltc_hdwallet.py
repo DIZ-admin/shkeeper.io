@@ -126,14 +126,15 @@ class LtcHDWallet(ltc):
 
         Example:
             >>> module = LtcHDWallet()
-            >>> address = module.mkaddr()
-            >>> print(address)
-            LMo7yLFZb3D8V8YU9CcDR3Y8Q2R8...
+            >>> from shkeeper import db
+            >>> with app.app_context(), db.session.begin():
+            ...     address = module.mkaddr()
+            >>> # Publish only after the transaction block commits.
 
         Notes:
             - Lazy-loads HDWalletProvider on first call
-            - Thread-safe address derivation
-            - Addresses are never reused (auto-increment index)
+            - Database-serialized allocation; the caller owns commit/rollback
+            - Committed address indexes survive process restarts
         """
         # Lazy-load HD wallet provider
         if self.hd_provider is None:
@@ -150,7 +151,7 @@ class LtcHDWallet(ltc):
         # Derive next address
         try:
             address, index = self.hd_provider.derive_next_address()
-            logger.info(f"Generated LTC address at index {index}: {address}")
+            logger.info(f"Allocated LTC HD address index {index} in the caller transaction")
             return address
         except Exception as e:
             logger.error(f"Failed to derive Litecoin address: {e}", exc_info=True)

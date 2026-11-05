@@ -135,6 +135,8 @@ def get_all_balances():
 def generate_address(crypto_name):
     crypto = Crypto.instances[crypto_name]
     addr = crypto.mkaddr()
+    # HD allocation is transaction-owned; persist before publishing a standalone address.
+    db.session.commit()
     return {"status": "success", "addr": addr}
 
 

@@ -5,6 +5,8 @@ on:
 
 jobs:
   docker:
+    # Only the upstream owner may publish to its Docker Hub namespace.
+    if: github.repository == 'vsyshost/shkeeper.io'
     runs-on: ubuntu-latest
     steps:
       -
